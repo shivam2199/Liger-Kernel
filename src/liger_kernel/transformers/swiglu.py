@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+from liger_kernel.ops import LigerFusedLinearActMulFunction
 from liger_kernel.ops import LigerFusedMoEFunction
 from liger_kernel.ops import LigerSiLUMulFunction
 
@@ -19,6 +20,33 @@ class LigerSwiGLUMLP(nn.Module):
 
     def forward(self, x):
         return self.down_proj(LigerSiLUMulFunction.apply(self.gate_proj(x), self.up_proj(x)))
+
+
+class LigerFusedLinearSwiGLUMLP(nn.Module):
+    """
+    Drop-in replacement for LigerSwiGLUMLP that fuses gate_proj's matmul
+    with the SiLU activation and up-gating. Saves the (T, I) gate
+    pre-activation HBM round-trip. See liger_kernel.ops.fused_linear_act_mul
+    for scope and numerics notes.
+
+    Bias on gate_proj is not supported; up_proj and down_proj remain
+    unchanged torch Linear modules.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        if config.hidden_act not in ["silu", "swish"]:
+            raise ValueError(f"Activation function {config.hidden_act} not supported.")
+
+    def forward(self, x):
+        gate_up = LigerFusedLinearActMulFunction.apply(x, self.gate_proj.weight, self.up_proj(x), 1.0)
+        return self.down_proj(gate_up)
 
 
 class LigerBlockSparseTop2MLP(nn.Module):
