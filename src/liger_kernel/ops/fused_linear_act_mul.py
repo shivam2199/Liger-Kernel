@@ -59,6 +59,7 @@ def _fused_linear_silu_mul_fwd_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
@@ -82,7 +83,7 @@ def _fused_linear_silu_mul_fwd_kernel(
         k_mask = offs_k[None, :] < K - k * BLOCK_K
         x_blk = tl.load(x_ptrs, mask=k_mask, other=0.0)
         w_blk = tl.load(w_ptrs, mask=k_mask, other=0.0)
-        acc = tl.dot(x_blk, tl.trans(w_blk), acc)
+        acc = tl.dot(x_blk, tl.trans(w_blk), acc, input_precision=INPUT_PRECISION)
         x_ptrs += BLOCK_K * stride_xk
         w_ptrs += BLOCK_K * stride_wk
 
@@ -190,6 +191,9 @@ def fused_linear_silu_mul_forward(x, gate_weight, up_states, gate_multiplier: fl
     BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M = 128, 128, 32, 8
     num_warps, num_stages = 4, 3
 
+    # fp32 inputs must use IEEE to match torch.matmul; bf16/fp16 use tensor-core default.
+    input_precision = "ieee" if x.dtype == torch.float32 else "tf32"
+
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),)
     _fused_linear_silu_mul_fwd_kernel[grid](
         x,
@@ -215,6 +219,7 @@ def fused_linear_silu_mul_forward(x, gate_weight, up_states, gate_multiplier: fl
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         GROUP_M=GROUP_M,
+        INPUT_PRECISION=input_precision,
         num_warps=num_warps,
         num_stages=num_stages,
     )
